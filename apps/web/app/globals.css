@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Apple design language: content-first, whitespace over chrome */
+body {
+  @apply bg-white text-ink font-sans antialiased;
+}
+
+@layer components {
+  /* Hairline divider — the separator of choice; not boxes */
+  .divider {
+    @apply border-t border-hairline;
+  }
+  .btn-primary {
+    @apply bg-accent text-white rounded-full px-6 py-2.5 text-[15px] font-medium
+           shadow-sm shadow-accent/30 hover:opacity-90 active:scale-[0.98]
+           transition-all disabled:opacity-40 disabled:shadow-none;
+  }
+  .btn-secondary {
+    @apply bg-canvas text-ink rounded-full px-6 py-2.5 text-[15px] font-medium
+           hover:bg-hairline/60 active:scale-[0.98] transition-all disabled:opacity-40;
+  }
+  .btn-quiet {
+    @apply text-accent text-[15px] font-medium hover:underline;
+  }
+  .field {
+    @apply w-full bg-canvas rounded-xl px-4 py-3 text-[15px] outline-none
+           border border-transparent transition-colors placeholder:text-subtle
+           focus:bg-white focus:border-accent/50 focus:ring-4 focus:ring-accent/10;
+  }
+  .monogram {
+    @apply flex h-9 w-9 shrink-0 items-center justify-center rounded-full
+           bg-canvas text-[13px] font-semibold text-subtle;
+  }
+  .page-title {
+    @apply text-[28px] sm:text-[34px] font-semibold tracking-tight;
+  }
+  .fade-in {
+    animation: fadeIn 0.4s ease-out;
+  }
+  .section-title {
+    @apply text-[22px] font-semibold tracking-tight;
+  }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}

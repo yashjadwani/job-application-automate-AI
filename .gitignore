@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node
+node_modules/
+.next/
+out/
+
+# Env — never commit secrets
+.env
+.env.local
+.env*.local
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+
+# Modal
+.modal/
+*.ipynb
