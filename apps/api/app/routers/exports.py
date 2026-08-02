@@ -1,4 +1,5 @@
 import io
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -6,7 +7,7 @@ from supabase import Client
 
 from ..auth import AuthedUser, CurrentUser
 from ..db import user_client
-from ..docx_parser import rewrite_docx
+from ..docx_parser import render_cv_docx
 from ..pdf import cover_letter_pdf, docx_to_pdf
 
 router = APIRouter(tags=["exports"])
@@ -31,11 +32,12 @@ def load_completed_analysis(client: Client, user_id: str, analysis_id: str) -> d
 def build_tailored_docx(client: Client, user_id: str, analysis: dict) -> bytes:
     cv_rows = (client.table("cv_structure").select("*")
                .eq("user_id", user_id).execute()).data
-    if not cv_rows or not cv_rows[0].get("original_docx_url"):
-        raise HTTPException(409, "Original CV not found in storage")
+    if not cv_rows:
+        raise HTTPException(409, "No CV on file")
     cv = cv_rows[0]
-    original = client.storage.from_("cv-originals").download(cv["original_docx_url"])
-    tailored = rewrite_docx(original, cv["sections"], analysis["rewritten_bullets"])
+    # Option B: regenerate a clean CV from the parsed structure + rewritten
+    # bullets (no dependency on the original file's formatting).
+    tailored = render_cv_docx(cv, analysis["rewritten_bullets"])
 
     export_path = f"{user_id}/{analysis['id']}/cv.docx"
     try:
@@ -68,9 +70,26 @@ def build_cover_pdf(client: Client, user_id: str, analysis: dict) -> bytes:
     return pdf
 
 
-def _filename(analysis: dict, stem: str, ext: str) -> str:
+def _original_stem(client: Client, user_id: str) -> str:
+    rows = (client.table("cv_structure").select("original_filename")
+            .eq("user_id", user_id).execute()).data
+    name = (rows[0].get("original_filename") if rows else None) or "CV"
+    return name.rsplit(".", 1)[0].replace(" ", "_")
+
+
+def _stamp(analysis: dict) -> str:
+    raw = analysis.get("created_at") or ""
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        dt = datetime.now(timezone.utc)
+    return dt.strftime("%Y%m%d-%H%M")
+
+
+def _filename(original_stem: str, analysis: dict, kind: str, ext: str) -> str:
     company = (analysis.get("company_name") or "tailored").replace(" ", "_")
-    return f"{stem}_{company}.{ext}"
+    parts = [p for p in [original_stem, kind, company, _stamp(analysis)] if p]
+    return f"{'_'.join(parts)}.{ext}"
 
 
 def _stream(data: bytes, media_type: str, filename: str) -> StreamingResponse:
@@ -87,7 +106,8 @@ def export_docx(analysis_id: str, user: AuthedUser = CurrentUser):
     client = user_client(user.token)
     analysis = load_completed_analysis(client, user.user_id, analysis_id)
     tailored = build_tailored_docx(client, user.user_id, analysis)
-    return _stream(tailored, DOCX_MIME, _filename(analysis, "CV", "docx"))
+    stem = _original_stem(client, user.user_id)
+    return _stream(tailored, DOCX_MIME, _filename(stem, analysis, "", "docx"))
 
 
 @router.post("/export/pdf/{analysis_id}")
@@ -108,7 +128,8 @@ def export_cv_pdf(analysis_id: str, user: AuthedUser = CurrentUser):
             {"content-type": "application/pdf", "upsert": "true"})
     except Exception:
         pass
-    return _stream(pdf, "application/pdf", _filename(analysis, "CV", "pdf"))
+    stem = _original_stem(client, user.user_id)
+    return _stream(pdf, "application/pdf", _filename(stem, analysis, "", "pdf"))
 
 
 @router.post("/export/cover-pdf/{analysis_id}")
@@ -116,4 +137,5 @@ def export_cover_pdf(analysis_id: str, user: AuthedUser = CurrentUser):
     client = user_client(user.token)
     analysis = load_completed_analysis(client, user.user_id, analysis_id)
     pdf = build_cover_pdf(client, user.user_id, analysis)
-    return _stream(pdf, "application/pdf", _filename(analysis, "Cover_Letter", "pdf"))
+    stem = _original_stem(client, user.user_id)
+    return _stream(pdf, "application/pdf", _filename(stem, analysis, "Cover_Letter", "pdf"))

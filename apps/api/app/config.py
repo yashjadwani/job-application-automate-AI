@@ -21,18 +21,42 @@ class Settings(BaseSettings):
     telegram_webhook_secret: str = ""
     telegram_bot_username: str = ""
 
-    openai_api_key: str = ""
-    # OpenAI-compatible gateway (e.g. OpenCode). Empty = api.openai.com.
-    openai_base_url: str = ""
-    # PRD: exact model TBD — override via env once verified against current pricing.
-    openai_model: str = "gpt-4o"
-    # $ per 1M tokens for cost tracking in llm_calls (0 = don't compute cost)
+    tavily_api_key: str = ""
+
+    # --- LLM providers -----------------------------------------------------
+    # Agents run on OpenCode; on ANY failure they fall back to OpenRouter
+    # (primary → fallback model). The planner (orchestrator) runs on Gemini,
+    # itself falling back to the OpenRouter models. See app/pipeline/providers.py
+    opencode_api_key: str = ""
+    opencode_base_url: str = "https://opencode.ai/zen/v1"
+    opencode_model: str = "deepseek-v4-flash-free"
+
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_llm_primary: str = "openai/gpt-oss-20b:free"
+    openrouter_llm_fallback: str = "nvidia/nemotron-3-super-120b-a12b:free"
+
+    # Planner / orchestrator model (Gemini). Can be Google's OpenAI-compatible
+    # endpoint, or leave the key empty to run the planner on OpenRouter instead.
+    gemini_api_key: str = ""
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    gemini_model: str = "gemini-3-flash-preview"
+    #gemini_model: str = "gemini-2.5-flash-lite"
+    #gemini_model: str = "gemini-2.5-flash"
+
+    # Approximate $/1M tokens for cost tracking (flat across models; 0 = skip)
     openai_input_cost_per_1m: float = 0.0
     openai_output_cost_per_1m: float = 0.0
 
     monthly_analysis_quota: int = 30
     # Pause the pipeline for bullet review before writing the cover letter
     hitl_enabled: bool = True
+
+    # Planner-based dynamic orchestration (opt-in). When false, the original
+    # fixed-order linear pipeline runs — fully preserved as the fallback.
+    planner_enabled: bool = False
+    planner_max_retries: int = 1        # per-agent retries before skip/fail
+    planner_max_revisions: int = 2      # rewrite<->critic loop cap
 
     cors_origins: str = "http://localhost:3000"
 

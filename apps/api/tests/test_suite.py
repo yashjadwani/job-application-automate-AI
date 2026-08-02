@@ -15,10 +15,18 @@ import sys
 import time
 from pathlib import Path
 
-# Env must exist before app.config's Settings is instantiated
-os.environ.setdefault("SUPABASE_URL", "https://test.supabase.co")
-os.environ.setdefault("SUPABASE_ANON_KEY", "test-anon")
-os.environ.setdefault("OPENAI_API_KEY", "sk-test")
+# Env must exist before app.config's Settings is instantiated.
+# Real env vars beat the developer's .env file in pydantic-settings priority,
+# so we PIN every behaviour-relevant setting — tests must be hermetic and not
+# change meaning based on what's in apps/api/.env.
+os.environ["SUPABASE_URL"] = "https://test.supabase.co"
+os.environ["SUPABASE_ANON_KEY"] = "test-anon"
+os.environ["OPENAI_API_KEY"] = "sk-test"
+os.environ["OPENAI_BASE_URL"] = ""      # default OpenAI → hosted research path
+os.environ["TAVILY_API_KEY"] = ""
+os.environ["HITL_ENABLED"] = "true"
+os.environ["PLANNER_ENABLED"] = "false"   # linear path is default in tests
+os.environ["SUPABASE_JWT_ISSUER"] = ""
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -49,6 +57,17 @@ class _FakeJWKS:
 @pytest.fixture(autouse=True)
 def _mock_jwks(monkeypatch):
     monkeypatch.setattr(auth, "_get_jwks_client", lambda: _FakeJWKS())
+
+
+@pytest.fixture(autouse=True)
+def _reset_capability_flags():
+    """Strict-mode detection is cached at module level; keep tests isolated."""
+    from app.pipeline import stages, tools
+    stages._strict_supported = {}
+    tools._finish_strict = True
+    yield
+    stages._strict_supported = {}
+    tools._finish_strict = True
 
 
 def make_token(sub="11111111-1111-1111-1111-111111111111", email="t@t.co",
@@ -168,18 +187,58 @@ class TestDocx:
         assert len(secs[0]["bullets"]) == 2 and len(secs[1]["bullets"]) == 1
         assert secs[0]["bullets"][0]["text"] == "Built ETL pipelines in Python"
 
-    def test_rewrite_replaces_text_and_preserves_structure(self):
-        from app.docx_parser import parse_docx, rewrite_docx
-        original = self._make_cv()
-        parsed = parse_docx(original)
-        new = rewrite_docx(original, parsed["sections"], {
+    def test_parse_caps_headings_without_word_styles(self):
+        # Hand-formatted CV: section headers are ALL-CAPS Normal paragraphs,
+        # NOT Word Heading styles (the real-world case that broke parsing).
+        from io import BytesIO
+        from docx import Document
+        from app.docx_parser import parse_docx
+        doc = Document()
+        doc.add_paragraph("Yash Jadwani")                       # preamble
+        doc.add_paragraph("yash@example.com | Derby, UK")       # preamble
+        doc.add_paragraph("SKILLS")                             # caps heading
+        doc.add_paragraph("Python, SQL, FastAPI", style="List Bullet")
+        doc.add_paragraph("KEY PROJECTS")                       # caps heading
+        doc.add_paragraph("Built a RAG platform", style="List Bullet")
+        doc.add_paragraph("Fine-tuned an LLM", style="List Bullet")
+        buf = BytesIO(); doc.save(buf)
+        parsed = parse_docx(buf.getvalue())
+        assert [s["title"] for s in parsed["sections"]] == ["SKILLS", "KEY PROJECTS"]
+        assert len(parsed["sections"][1]["bullets"]) == 2
+        # a mixed-case line is NOT a heading
+        assert "Yash Jadwani" not in [s["title"] for s in parsed["sections"]]
+
+    def test_render_clean_cv_substitutes_bullets(self):
+        # Option B: regenerate a fresh DOCX from parsed structure + rewrites.
+        from app.docx_parser import parse_docx, render_cv_docx
+        parsed = parse_docx(self._make_cv())
+        out = render_cv_docx(parsed, {
             "sec_0": ["NEW bullet one", "NEW bullet two"],
             "sec_1": ["NEW project bullet"],
         })
-        reparsed = parse_docx(new)
-        assert reparsed["sections"][0]["bullets"][0]["text"] == "NEW bullet one"
-        assert reparsed["sections"][1]["bullets"][0]["text"] == "NEW project bullet"
-        assert len(reparsed["sections"][0]["bullets"]) == 2
+        # The regenerated file parses back with the tailored bullets in place.
+        reparsed = parse_docx(out)
+        titles = [s["title"] for s in reparsed["sections"]]
+        assert "EXPERIENCE" in titles and "PROJECTS" in titles
+        exp = next(s for s in reparsed["sections"] if s["title"] == "EXPERIENCE")
+        assert exp["bullets"][0]["text"] == "NEW bullet one"
+        assert len(exp["bullets"]) == 2
+
+    def test_numbered_titles_are_not_bullets(self):
+        # A decimal-numbered line (1. Project) must be a subhead, not a bullet
+        # (this is what caused the "1. PDF Chat" mangling in the edit approach).
+        from io import BytesIO
+        from docx import Document
+        from app.docx_parser import parse_docx
+        doc = Document()
+        doc.add_paragraph("KEY PROJECTS")
+        doc.add_paragraph("A numbered project title", style="List Number")
+        doc.add_paragraph("A real achievement bullet", style="List Bullet")
+        buf = BytesIO(); doc.save(buf)
+        sec = parse_docx(buf.getvalue())["sections"][0]
+        assert len(sec["bullets"]) == 1                      # only the bullet
+        assert sec["bullets"][0]["text"] == "A real achievement bullet"
+        assert any(b["type"] == "subhead" for b in sec["blocks"])
 
 
 # ===========================================================================
@@ -220,6 +279,36 @@ class TestGuardrails:
     def test_telemetry_safe_without_context(self):
         from app import telemetry
         telemetry.record("x", "m", 1)  # must not raise
+
+    def test_structured_falls_back_when_strict_rejected(self, monkeypatch):
+        """Gateways that 400 on json_schema strict mode: first call flips the
+        cached flag, fallback prompt-JSON path takes over permanently."""
+        import httpx
+        from openai import BadRequestError
+        from app.pipeline import stages
+
+        calls = []
+
+        def fake_chat(label, **kwargs):
+            calls.append((label, "response_format" in kwargs))
+            if "response_format" in kwargs:
+                req = httpx.Request("POST", "http://gw")
+                raise BadRequestError(
+                    "Upstream request failed",
+                    response=httpx.Response(400, request=req), body=None)
+            return _fake_resp(FakeMsg('```json\n{"score": 7}\n```'))
+
+        monkeypatch.setattr(stages, "_chat", fake_chat)
+        schema = {"type": "object", "properties": {"score": {"type": "integer"}},
+                  "required": ["score"], "additionalProperties": False}
+
+        out = stages._structured("sys", "user", "t1", schema)
+        assert out == {"score": 7}
+        # Second call must skip strict entirely (flag cached)
+        out2 = stages._structured("sys", "user", "t2", schema)
+        assert out2 == {"score": 7}
+        strict_attempts = [c for c in calls if c[1]]
+        assert len(strict_attempts) == 1, "strict retried despite cached flag"
 
 
 # ===========================================================================
@@ -295,6 +384,11 @@ def make_fake_llm():
     def fake_chat(label, **kwargs):
             fmt = kwargs.get("response_format")
             schema = (fmt or {}).get("json_schema", {}).get("name", "")
+            if schema == "analysis_plan":                # planner
+                return _fake_resp(FakeMsg(json.dumps({
+                    "plan": ["research", "cv_analysis", "ats", "rewrite",
+                             "critic", "cover_letter"],
+                    "reasoning": "employer known; full run"})))
             if kwargs.get("tools"):                      # analyst tool loop
                 analyst_calls["n"] += 1
                 if analyst_calls["n"] == 1:
@@ -366,7 +460,7 @@ class TestPipelineDryRun:
         # ATS scans the CV document) → 1 of 3 = 33, computed deterministically
         assert db.state["ats_score"] == 33
         assert set(db.state["ats_keywords"]["missing"]) == {"SQL", "Kubernetes"}
-        assert db.state["employer_research"]["findings"][0]["sources"]
+        # research skips without TAVILY (covered by test_research_tool_loop_mode)
         assert critic_calls["n"] == 2             # revise once, then approve
 
         # Phase 2: resume after approval → reviewing → done with cover letter
@@ -403,6 +497,52 @@ class TestPipelineDryRun:
         assert statuses[-1] == "done"
         assert db.state["cover_letter_text"].startswith("Dear")
 
+    def test_research_tool_loop_mode(self, monkeypatch):
+        """With a Tavily key set (gateway mode), research runs as a search_web
+        function-tool loop and drops uncited findings."""
+        from app.config import get_settings
+        from app.pipeline import agents, stages
+        from app.pipeline import tools as t
+
+        monkeypatch.setattr(get_settings(), "tavily_api_key", "tvly-test")
+        monkeypatch.setattr(t, "web_search", lambda query: {
+            "results": [{"title": "News", "url": "https://n.example/a",
+                         "content": "Raised Series B"}]})
+
+        calls = {"n": 0}
+
+        def fake_chat(label, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _fake_resp(FakeMsg(tool_calls=[FakeToolCall(
+                    "search_web", json.dumps({"query": "Acme layoffs"}))]))
+            return _fake_resp(FakeMsg(tool_calls=[FakeToolCall(
+                "finish", json.dumps({
+                    "findings": [
+                        {"category": "recent news", "insight": "Raised Series B",
+                         "sources": ["https://n.example/a"]},
+                        {"category": "culture", "insight": "uncited claim",
+                         "sources": []},
+                    ],
+                    "talking_points": ["Mention the Series B"]}))]))
+
+        monkeypatch.setattr(stages, "_chat", fake_chat)
+        trace = agents.Trace()
+        result = agents.research_agent("Acme", "some jd text", trace)
+
+        assert len(result["findings"]) == 1          # uncited finding dropped
+        assert result["findings"][0]["sources"] == ["https://n.example/a"]
+        assert any(e["action"] == "tool: search_web" for e in trace.events)
+
+    def test_research_skipped_without_tavily(self, monkeypatch):
+        from app.config import get_settings
+        from app.pipeline import agents
+
+        monkeypatch.setattr(get_settings(), "tavily_api_key", "")
+        trace = agents.Trace()
+        assert agents.research_agent("Acme", "jd", trace) is None
+        assert any(e["action"] == "skipped" for e in trace.events)
+
     def test_pipeline_failure_is_recorded(self, monkeypatch):
         from app.pipeline import stages, worker
 
@@ -418,3 +558,89 @@ class TestPipelineDryRun:
         analyses = [f for t, f in db.updates if t == "analyses"]
         assert analyses[-1]["status"] == "failed"
         assert "OpenAI unreachable" in analyses[-1]["error"]
+
+
+class TestPlanner:
+    """The planner-based orchestrator (PLANNER_ENABLED). Linear path is default;
+    these opt in via monkeypatch."""
+
+    def _reg_ctx(self, company="Acme"):
+        from app.pipeline.context import AnalysisContext
+        from app.pipeline.registry import build_agent_registry
+        return build_agent_registry(), AnalysisContext(
+            "u", "a", FAKE_PROFILE, FAKE_CV, "jd text", company=company)
+
+    def test_validate_plan_completes_deps_and_orders(self):
+        from app.pipeline import planner
+        reg, ctx = self._reg_ctx()
+        # Planner proposes only "rewrite" → validator must add its deps,
+        # insert a critic after it, and force cover_letter last.
+        plan = planner.validate_plan(["rewrite"], ctx, reg)
+        assert "cv_analysis" in plan and "ats" in plan
+        assert plan.index("rewrite") < plan.index("critic")
+        assert plan[-1] == "cover_letter"
+
+    def test_validate_plan_skips_completed_work(self):
+        from app.pipeline import planner
+        reg, ctx = self._reg_ctx(company=None)
+        ctx.data["match"] = {"score": 1, "summary": "", "matched_skills": [], "gaps": []}
+        ctx.data["ats"] = {"ats_score": 1, "present": [], "missing": []}
+        ctx.data["rewritten_bullets"] = {"sec_0": ["x"]}
+        plan = planner.validate_plan([], ctx, reg)
+        assert plan == ["cover_letter"]   # only the missing deliverable
+
+    def test_full_planner_run_pauses_then_resumes(self, monkeypatch):
+        from app.config import get_settings
+        from app.pipeline import stages, worker
+        monkeypatch.setattr(get_settings(), "planner_enabled", True)
+
+        fake_chat, fake_respond, _ = make_fake_llm()
+        monkeypatch.setattr(stages, "_chat", fake_chat)
+        monkeypatch.setattr(stages, "_respond", fake_respond)
+
+        db = FakeDB()
+        worker.run_analysis(db, "u1", "a1", FAKE_PROFILE, FAKE_CV,
+                            "A long job description " * 20, "Acme", None)
+
+        statuses = [f["status"] for t, f in db.updates
+                    if t == "analyses" and "status" in f]
+        for s in ("researching", "analysing", "writing"):
+            assert s in statuses, f"missing status {s}"
+        assert statuses[-1] == "awaiting_approval"
+        assert "cover_letter_text" not in db.state
+        assert db.state["rewritten_bullets"] == GOOD_BULLETS
+        assert db.state["match_score"] == 72
+        # planner decision + a revision round are recorded in the trace
+        trace = db.state["agent_trace"]
+        assert any(e["agent"] == "Planner" and e["action"] == "plan" for e in trace)
+        assert any(e["action"] == "revision" for e in trace)
+
+        # Resume after approval → cover letter → done, no duplicate rewrite
+        worker.resume_analysis(db, "u1", "a1")
+        statuses = [f["status"] for t, f in db.updates
+                    if t == "analyses" and "status" in f]
+        assert statuses[-1] == "done"
+        assert db.state["cover_letter_text"].startswith("Dear")
+
+    def test_planner_recovers_from_optional_agent_failure(self, monkeypatch):
+        """Research (optional) failing must not fail the whole run."""
+        from app.config import get_settings
+        from app.pipeline import agents, stages, worker
+        monkeypatch.setattr(get_settings(), "planner_enabled", True)
+        monkeypatch.setattr(get_settings(), "hitl_enabled", False)
+
+        fake_chat, fake_respond, _ = make_fake_llm()
+        monkeypatch.setattr(stages, "_chat", fake_chat)
+        monkeypatch.setattr(stages, "_respond", fake_respond)
+
+        def boom(*a, **k):
+            raise RuntimeError("search down")
+        monkeypatch.setattr(agents, "research_agent", boom)
+
+        db = FakeDB()
+        worker.run_analysis(db, "u1", "a2", FAKE_PROFILE, FAKE_CV,
+                            "A long job description " * 20, "Acme", None)
+        statuses = [f["status"] for t, f in db.updates
+                    if t == "analyses" and "status" in f]
+        assert statuses[-1] == "done"                 # survived the failure
+        assert db.state["cover_letter_text"].startswith("Dear")

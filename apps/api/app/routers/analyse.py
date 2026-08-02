@@ -109,6 +109,16 @@ def get_analysis_calls(analysis_id: str, user: AuthedUser = CurrentUser):
             .order("created_at").execute()).data
 
 
+@router.get("/analyses/{analysis_id}/events")
+def get_analysis_events(analysis_id: str, user: AuthedUser = CurrentUser):
+    """Per-agent execution trail with wall-clock timing for one analysis."""
+    client = user_client(user.token)
+    return (client.table("analysis_events")
+            .select("agent, stage, status, detail, error, started_at, duration_ms")
+            .eq("analysis_id", analysis_id).eq("user_id", user.user_id)
+            .order("started_at").execute()).data
+
+
 @router.get("/analyses")
 def list_analyses(user: AuthedUser = CurrentUser):
     client = user_client(user.token)

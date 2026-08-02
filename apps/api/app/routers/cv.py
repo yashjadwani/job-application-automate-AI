@@ -37,6 +37,8 @@ async def upload_cv(file: UploadFile, user: AuthedUser = CurrentUser):
         "personal": parsed["personal"],
         "sections": parsed["sections"],
         "original_docx_url": path,
+        "original_filename": file.filename,
+        "links": parsed["links"],
     }
     result = client.table("cv_structure").upsert(row, on_conflict="user_id").execute()
     return result.data[0]

@@ -1,10 +1,12 @@
 import type { Metadata, Viewport } from "next";
 import { Nav } from "@/components/Nav";
+import { Footer } from "@/components/Footer";
+import { APP } from "@/lib/meta";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "CV Tailor",
-  description: "Tailor your CV and cover letter to every role",
+  title: APP.name,
+  description: APP.tagline,
 };
 
 export const viewport: Viewport = {
@@ -15,9 +17,10 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body>
+      <body className="flex min-h-screen flex-col">
         <Nav />
-        <main className="mx-auto max-w-4xl px-6 py-10">{children}</main>
+        <main className="mx-auto w-full max-w-4xl flex-1 px-6 py-10">{children}</main>
+        <Footer />
       </body>
     </html>
   );

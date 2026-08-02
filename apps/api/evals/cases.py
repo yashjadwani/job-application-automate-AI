@@ -31,7 +31,7 @@ PROFILE = {
 CASES = [
     {
         "id": "analytics_engineer",
-        "company": "Streamly",
+        "company": "p3rform",
         "jd": """Analytics Engineer — Streamly (remote)
 We're looking for an analytics engineer to own our dbt models and warehouse.
 You'll build and maintain data models in dbt on Snowflake, write robust SQL,

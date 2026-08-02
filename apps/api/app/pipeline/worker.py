@@ -73,6 +73,23 @@ def _notify(client: Client, user_id: str, analysis_id: str,
 def run_analysis(client: Client, user_id: str, analysis_id: str, profile: dict,
                  cv: dict, jd_text: str, company: str | None,
                  user_notes: str | None, notify_chat_id: int | None = None):
+    """Entry point (unchanged signature). Dispatches to the planner-based
+    orchestrator when PLANNER_ENABLED, else runs the original linear pipeline."""
+    if get_settings().planner_enabled:
+        from .context import AnalysisContext
+        from .orchestrator import run as planner_run
+        from .registry import build_agent_registry
+        ctx = AnalysisContext(user_id=user_id, analysis_id=analysis_id,
+                              profile=profile, cv=cv, jd_text=jd_text,
+                              company=company, user_notes=user_notes)
+        return planner_run(client, ctx, build_agent_registry(), notify_chat_id)
+    return _run_linear(client, user_id, analysis_id, profile, cv, jd_text,
+                       company, user_notes, notify_chat_id)
+
+
+def _run_linear(client: Client, user_id: str, analysis_id: str, profile: dict,
+                cv: dict, jd_text: str, company: str | None,
+                user_notes: str | None, notify_chat_id: int | None = None):
     """Phase 1: research → analyse → rewrite (+guardrails). Pauses for HITL."""
     trace = Trace()
 
@@ -96,7 +113,8 @@ def run_analysis(client: Client, user_id: str, analysis_id: str, profile: dict,
         if company:
             step("researching")
             try:
-                research = research_agent(company, jd_text, trace)
+                with telemetry.record_stage("research", "researching"):
+                    research = research_agent(company, jd_text, trace)
             except guardrails.BudgetExceeded:
                 raise
             except Exception:
@@ -106,9 +124,11 @@ def run_analysis(client: Client, user_id: str, analysis_id: str, profile: dict,
 
         # Analysis: tool-using analyst + hybrid ATS
         step("analysing")
-        match = match_analyst_agent(profile, cv, jd_text, research, trace)
+        with telemetry.record_stage("match", "analysing"):
+            match = match_analyst_agent(profile, cv, jd_text, research, trace)
         trace.add("Analyst", "match scored", f"{match['score']}/100")
-        ats = ats_agent(cv, jd_text, trace)
+        with telemetry.record_stage("ats", "analysing"):
+            ats = ats_agent(cv, jd_text, trace)
         step("analysing",
              match_score=match["score"],
              match_summary=match["summary"],
@@ -119,7 +139,8 @@ def run_analysis(client: Client, user_id: str, analysis_id: str, profile: dict,
 
         # Rewrite with critic loop
         step("writing")
-        bullets = rewrite_with_critic(profile, cv, jd_text, ats["missing"], trace)
+        with telemetry.record_stage("rewrite", "writing"):
+            bullets = rewrite_with_critic(profile, cv, jd_text, ats["missing"], trace)
 
         # Output guardrail: deterministic validation, then scrub as last resort
         sections = [s for s in cv.get("sections", []) if s.get("bullets")]
@@ -162,6 +183,51 @@ def run_analysis(client: Client, user_id: str, analysis_id: str, profile: dict,
 
 def resume_analysis(client: Client, user_id: str, analysis_id: str,
                     notify_chat_id: int | None = None):
+    """Resume after human approval. Dispatches like run_analysis."""
+    if get_settings().planner_enabled:
+        return _resume_planner(client, user_id, analysis_id, notify_chat_id)
+    return _resume_linear(client, user_id, analysis_id, notify_chat_id)
+
+
+def _resume_planner(client: Client, user_id: str, analysis_id: str,
+                    notify_chat_id: int | None = None):
+    from .context import AnalysisContext
+    from .orchestrator import run as planner_run
+    from .registry import build_agent_registry
+
+    row = _get(client, analysis_id)
+    if not row or row["status"] != "awaiting_approval":
+        log.warning("resume(planner) on %s in state %s", analysis_id,
+                    row and row["status"])
+        return
+    cv = (client.table("cv_structure").select("*")
+          .eq("user_id", user_id).execute()).data
+    ctx = AnalysisContext(
+        user_id=user_id, analysis_id=analysis_id,
+        profile=_get_profile(client, user_id), cv=cv[0] if cv else {"sections": []},
+        jd_text=row["jd_text"], company=row.get("company_name"),
+        user_notes=row.get("user_notes"))
+    # Rehydrate shared memory from the persisted row so nothing re-runs
+    ctx.trace.events = list(row.get("agent_trace") or [])
+    if row.get("employer_research"):
+        ctx.data["research"] = row["employer_research"]
+    if row.get("match_score") is not None:
+        ctx.data["match"] = {"score": row["match_score"],
+                             "summary": row.get("match_summary") or "",
+                             "matched_skills": row.get("matched_skills") or [],
+                             "gaps": row.get("gaps") or []}
+    if row.get("ats_score") is not None:
+        kw = row.get("ats_keywords") or {}
+        ctx.data["ats"] = {"ats_score": row["ats_score"],
+                           "present": kw.get("present", []),
+                           "missing": kw.get("missing", [])}
+    if row.get("rewritten_bullets"):
+        ctx.data["rewritten_bullets"] = row["rewritten_bullets"]
+    planner_run(client, ctx, build_agent_registry(), notify_chat_id, resume=True)
+
+
+def _resume_linear(client: Client, user_id: str, analysis_id: str,
+                   notify_chat_id: int | None = None):
     """Phase 2 (after approval): cover letter with editor pass → done."""
     telemetry.set_context(client, user_id, analysis_id)
     guardrails.set_budget(10)
@@ -184,9 +250,10 @@ def resume_analysis(client: Client, user_id: str, analysis_id: str,
         profile = _get_profile(client, user_id)
         research = analysis.get("employer_research") or {}
         step("reviewing")
-        cover = cover_letter_agent(
-            profile, analysis["jd_text"], analysis.get("match_summary") or "",
-            research.get("talking_points", []), analysis.get("user_notes"), trace)
+        with telemetry.record_stage("cover_letter", "reviewing"):
+            cover = cover_letter_agent(
+                profile, analysis["jd_text"], analysis.get("match_summary") or "",
+                research.get("talking_points", []), analysis.get("user_notes"), trace)
         trace.add("Orchestrator", "complete", "all agents finished")
         step("done", cover_letter_text=cover)
     except Exception as exc:
@@ -212,11 +279,12 @@ def _finish(client: Client, user_id: str, analysis_id: str, trace: Trace,
              agent_trace=trace.events, **fields)
 
     step("reviewing")
-    cover = cover_letter_agent(
-        profile, (analysis or {}).get("jd_text", ""),
-        (analysis or {}).get("match_summary") or "",
-        research.get("talking_points", []),
-        (analysis or {}).get("user_notes"), trace)
+    with telemetry.record_stage("cover_letter", "reviewing"):
+        cover = cover_letter_agent(
+            profile, (analysis or {}).get("jd_text", ""),
+            (analysis or {}).get("match_summary") or "",
+            research.get("talking_points", []),
+            (analysis or {}).get("user_notes"), trace)
     trace.add("Orchestrator", "complete", "all agents finished")
     step("done", cover_letter_text=cover)
     _notify(client, user_id, analysis_id, notify_chat_id)

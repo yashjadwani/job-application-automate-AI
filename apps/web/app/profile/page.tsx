@@ -4,31 +4,71 @@ import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { PageHeader } from "@/components/PageHeader";
 
+type CvLink = { kind: string; url: string; text?: string; scope: string };
+
+const FIELD_BY_KIND: Record<string, keyof ReturnType<typeof emptyForm>> = {
+  email: "email",
+  linkedin: "linkedin_url",
+  github: "github_url",
+  portfolio: "portfolio_url",
+};
+const LABEL_BY_KIND: Record<string, string> = {
+  email: "Email", linkedin: "LinkedIn", github: "GitHub", portfolio: "Portfolio",
+};
+const linkValue = (l: CvLink) =>
+  l.kind === "email" ? l.url.replace(/^mailto:/, "") : l.url;
+
+function emptyForm() {
+  return {
+    name: "", email: "", linkedin_url: "", github_url: "",
+    portfolio_url: "", bio: "", additional_context: "",
+  };
+}
+
 export default function ProfilePage() {
-  const [form, setForm] = useState({
-    name: "", email: "", linkedin_url: "", bio: "", additional_context: "",
-  });
+  const [form, setForm] = useState(emptyForm());
   const [skills, setSkills] = useState<string[]>([]);
   const [skillInput, setSkillInput] = useState("");
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [cvLinks, setCvLinks] = useState<CvLink[]>([]);
+  const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
-    api<{ profile: any }>("/profile")
-      .then(({ profile }) => {
+    api<{ profile: any; cv: any }>("/profile")
+      .then(({ profile, cv }) => {
         if (profile) {
           setForm({
             name: profile.name ?? "",
             email: profile.email ?? "",
             linkedin_url: profile.linkedin_url ?? "",
+            github_url: profile.github_url ?? "",
+            portfolio_url: profile.portfolio_url ?? "",
             bio: profile.bio ?? "",
             additional_context: profile.additional_context ?? "",
           });
           setSkills(profile.skills ?? []);
         }
+        setCvLinks((cv?.links ?? []).filter((l: CvLink) => l.scope === "contact"));
       })
       .catch((e) => setError(e.message));
   }, []);
+
+  // Only offer links whose matching profile field is still empty.
+  const suggestions = cvLinks.filter((l) => {
+    const field = FIELD_BY_KIND[l.kind];
+    return field && !form[field];
+  });
+
+  function importLinks() {
+    const patch: Partial<typeof form> = {};
+    for (const l of suggestions) {
+      const field = FIELD_BY_KIND[l.kind];
+      if (field && !form[field]) patch[field] = linkValue(l);
+    }
+    setForm({ ...form, ...patch });
+    setDismissed(true);
+  }
 
   async function save() {
     setError(null);
@@ -60,10 +100,29 @@ export default function ProfilePage() {
         subtitle="This context guides every analysis and rewrite."
       />
 
+      {!dismissed && suggestions.length > 0 && (
+        <div className="mt-8 rounded-2xl bg-canvas px-5 py-4">
+          <p className="text-[15px]">
+            Found {suggestions.map((l) => LABEL_BY_KIND[l.kind]).join(", ")} in your CV.
+          </p>
+          <div className="mt-3 flex items-center gap-4">
+            <button className="btn-secondary" onClick={importLinks}>
+              Add to profile
+            </button>
+            <button className="text-[14px] text-subtle hover:text-ink transition-colors"
+              onClick={() => setDismissed(true)}>
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="mt-10 space-y-4">
         <input className="field" placeholder="Name" value={form.name} onChange={set("name")} />
         <input className="field" placeholder="Email" value={form.email} onChange={set("email")} />
         <input className="field" placeholder="LinkedIn URL" value={form.linkedin_url} onChange={set("linkedin_url")} />
+        <input className="field" placeholder="GitHub URL" value={form.github_url} onChange={set("github_url")} />
+        <input className="field" placeholder="Portfolio URL" value={form.portfolio_url} onChange={set("portfolio_url")} />
         <textarea className="field min-h-32" placeholder="Professional summary"
           value={form.bio} onChange={set("bio")} />
         <textarea className="field min-h-24"

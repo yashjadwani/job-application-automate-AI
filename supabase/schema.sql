@@ -33,9 +33,13 @@ create table if not exists public.cv_structure (
   personal jsonb default '{}',
   sections jsonb default '[]',          -- [{ id, title, date, bullets: [{ index, text }] }]
   original_docx_url text,               -- Storage path
+  original_filename text,               -- the user's uploaded filename (for export naming)
   updated_at timestamptz default now(),
   unique (user_id)
 );
+
+-- If cv_structure already exists (existing project), add the new column:
+alter table public.cv_structure add column if not exists original_filename text;
 
 alter table public.cv_structure enable row level security;
 
@@ -100,7 +104,8 @@ create table if not exists public.llm_calls (
   analysis_id uuid references public.analyses (id) on delete set null,
   label text not null,                  -- e.g. research_web_search, analyst_tool_loop
   kind text default 'chat',             -- chat | responses
-  model text,
+  provider text,                        -- opencode | openrouter | gemini
+  model text,                           -- the exact model id used
   status text default 'ok',             -- ok | error
   error text,
   latency_ms integer,
@@ -108,8 +113,13 @@ create table if not exists public.llm_calls (
   completion_tokens integer,
   total_tokens integer,
   cost_usd numeric(10, 6),
+  response text,                         -- the model's output (truncated to 8k)
   created_at timestamptz default now()
 );
+
+-- If llm_calls already exists (existing project), add the new columns:
+alter table public.llm_calls add column if not exists provider text;
+alter table public.llm_calls add column if not exists response text;
 
 alter table public.llm_calls enable row level security;
 
@@ -122,6 +132,38 @@ create index if not exists llm_calls_user_created_idx
   on public.llm_calls (user_id, created_at desc);
 create index if not exists llm_calls_analysis_idx
   on public.llm_calls (analysis_id);
+
+-- ---------------------------------------------------------------------------
+-- analysis_events — per-agent execution trail: one row per agent stage, with
+-- wall-clock timing (includes tool calls/retries, unlike llm_calls which is
+-- per LLM request). Append-only; powers "how long did each agent take".
+-- ---------------------------------------------------------------------------
+create table if not exists public.analysis_events (
+  id uuid primary key default gen_random_uuid(),
+  analysis_id uuid not null references public.analyses (id) on delete cascade,
+  user_id uuid not null references auth.users (id) on delete cascade,
+  agent text not null,                  -- research | match | ats | rewrite | critic | cover_letter | editor
+  stage text,                           -- the analyses.status this ran under (researching, analysing, …)
+  status text not null default 'ok'     -- ok | error | skipped
+    check (status in ('ok','error','skipped')),
+  detail text,
+  error text,
+  started_at timestamptz not null default now(),
+  duration_ms integer,
+  created_at timestamptz not null default now()
+);
+
+alter table public.analysis_events enable row level security;
+
+create policy "events_select_own" on public.analysis_events
+  for select using (user_id = auth.uid());
+create policy "events_insert_own" on public.analysis_events
+  for insert with check (user_id = auth.uid());
+
+create index if not exists analysis_events_analysis_idx
+  on public.analysis_events (analysis_id, started_at);
+create index if not exists analysis_events_user_agent_idx
+  on public.analysis_events (user_id, agent);
 
 -- ---------------------------------------------------------------------------
 -- telegram_links — connects a Telegram chat to a user (bot integration)

@@ -11,6 +11,8 @@ class ProfileIn(BaseModel):
     name: str | None = None
     email: str | None = None
     linkedin_url: str | None = None
+    github_url: str | None = None
+    portfolio_url: str | None = None
     bio: str | None = None
     skills: list[str] = []
     additional_context: str | None = None
