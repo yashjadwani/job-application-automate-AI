@@ -1,68 +1,16 @@
-"""Agent Registry + Tool Registry.
+"""Agent Registry.
 
-The Planner and orchestrator never call run_research()/run_ats() directly; they
-request agents and tools from these registries. Adding a new specialist agent
-(Interview Prep, Salary Insights, …) is: write its run function, register an
-AgentSpec, done — no orchestration code changes.
+The Planner and orchestrator never call the agent functions directly; they
+request agents from this registry. Adding a new specialist agent (Interview
+Prep, Salary Insights, …) is: write its run function, register an AgentSpec,
+done — no orchestration code changes.
 """
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from . import agents, stages, tools
+from . import agents, stages
 from .context import AnalysisContext
-
-# ===========================================================================
-# Tool Registry — planner-discoverable capabilities behind a common interface
-# ===========================================================================
-@dataclass
-class ToolSpec:
-    name: str
-    description: str
-    schema: dict                 # OpenAI function-tool schema
-    impl: Callable               # the callable
-
-
-class ToolRegistry:
-    def __init__(self):
-        self._tools: dict[str, ToolSpec] = {}
-
-    def register(self, spec: ToolSpec):
-        self._tools[spec.name] = spec
-
-    def get(self, name: str) -> ToolSpec | None:
-        return self._tools.get(name)
-
-    def names(self) -> list[str]:
-        return list(self._tools)
-
-    def catalog(self) -> list[dict]:
-        return [{"name": t.name, "description": t.description}
-                for t in self._tools.values()]
-
-
-def build_tool_registry() -> ToolRegistry:
-    """Global, stateless tools. Per-user CV tools are bound per request (they
-    close over the user's data) via tools.build_cv_toolkit()."""
-    reg = ToolRegistry()
-    reg.register(ToolSpec(
-        "web_search", "Search the public web (Tavily). Returns titles/URLs/snippets.",
-        tools.SEARCH_TOOL_SCHEMA[0], tools.web_search))
-    reg.register(ToolSpec(
-        "keyword_coverage",
-        "Deterministically check which keywords literally appear in a text.",
-        {"type": "function", "function": {
-            "name": "keyword_coverage",
-            "description": "Which keywords appear in the CV text.",
-            "parameters": {"type": "object", "properties": {
-                "cv_text": {"type": "string"},
-                "keywords": {"type": "array", "items": {"type": "string"}}},
-                "required": ["cv_text", "keywords"],
-                "additionalProperties": False}}},
-        tools.keyword_coverage))
-    # Extension point: register salary_lookup, interview_questions,
-    # company_lookup, MCP tools here — the Planner discovers them via catalog().
-    return reg
 
 
 # ===========================================================================

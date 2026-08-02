@@ -22,10 +22,6 @@ from . import stages, tools
 log = logging.getLogger("agents")
 
 MAX_REVISIONS = 2
-RESEARCH_CATEGORIES = [
-    "culture / red flags", "recent news", "funding or layoffs",
-    "leadership", "interview process",
-]
 
 
 class Trace:
@@ -38,19 +34,8 @@ class Trace:
 
 
 # ---------------------------------------------------------------------------
-# Research agent: search → self-assess → targeted second pass
+# Research agent: Tavily search tool-loop (skips gracefully without a key)
 # ---------------------------------------------------------------------------
-COVERAGE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "weak_categories": {"type": "array", "items": {"type": "string"}},
-        "sufficient": {"type": "boolean"},
-    },
-    "required": ["weak_categories", "sufficient"],
-    "additionalProperties": False,
-}
-
-
 RESEARCH_FINISH_SCHEMA = {
     "type": "object",
     "properties": {
@@ -116,50 +101,6 @@ def _research_with_search_tool(company: str, jd_text: str, trace: Trace) -> dict
     trace.add("Researcher", "found",
               f"{len(verdict['findings'])} cited findings")
     return verdict
-
-
-def _research_hosted(company: str, jd_text: str, trace: Trace) -> dict:
-    trace.add("Researcher", "searching", f"broad research on {company}")
-    result = stages.run_research(company, jd_text)
-    trace.add("Researcher", "found",
-              f"{len(result.get('findings', []))} cited findings")
-
-    # Self-assessment: which categories came back thin?
-    try:
-        assessment = stages._structured(
-            "You assess research coverage. Given findings grouped by category, "
-            f"decide which of these categories are missing or weak: "
-            f"{RESEARCH_CATEGORIES}. sufficient=true only if at most one is weak.",
-            json.dumps(result.get("findings", []), ensure_ascii=False),
-            "coverage", COVERAGE_SCHEMA,
-        )
-    except Exception:
-        trace.add("Researcher", "self-assessment failed", "keeping first pass")
-        return result
-
-    weak = assessment.get("weak_categories", [])[:3]
-    if assessment.get("sufficient") or not weak:
-        trace.add("Researcher", "coverage sufficient", "no follow-up needed")
-        return result
-
-    # Targeted second pass on the weak spots only
-    trace.add("Researcher", "follow-up search", f"weak: {', '.join(weak)}")
-    try:
-        focused = stages.run_research(
-            company,
-            jd_text + "\n\nFOCUS ONLY on these aspects of the company: "
-            + ", ".join(weak))
-        seen = {f["insight"][:80] for f in result.get("findings", [])}
-        merged = result.get("findings", []) + [
-            f for f in focused.get("findings", []) if f["insight"][:80] not in seen]
-        points = list(dict.fromkeys(
-            result.get("talking_points", []) + focused.get("talking_points", [])))
-        trace.add("Researcher", "merged",
-                  f"{len(merged)} findings after follow-up")
-        return {"findings": merged, "talking_points": points[:6]}
-    except Exception:
-        trace.add("Researcher", "follow-up failed", "keeping first pass")
-        return result
 
 
 # ---------------------------------------------------------------------------

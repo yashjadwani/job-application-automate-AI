@@ -1,13 +1,13 @@
 """The agentic analysis pipeline (PRD §3.1) — OpenAI, 4 stages + ATS scoring.
 
-Stage 0  Employer research   — Responses API + web_search tool, cited findings
 Stage 1  Match & gap         — strict Structured Outputs
 Stage 1b ATS keyword scoring — strict Structured Outputs (added post-PRD)
 Stage 2  Bullet rewriter     — strict Structured Outputs, bullet counts preserved
 Stage 3  Cover letter        — plain text
 
 All stages are synchronous functions; the worker in worker.py sequences them
-and advances analyses.status so the frontend can poll.
+and advances analyses.status so the frontend can poll. Employer research is a
+tool-loop agent (see agents.py), not a stage here.
 """
 
 import json
@@ -84,69 +84,6 @@ def _chat(label: str, role: str = "agent", **kwargs):
             response=_response_text(resp.choices[0].message))
         return resp
     raise last_exc or RuntimeError(f"no LLM provider configured for role '{role}'")
-
-
-def _respond(label: str, role: str = "agent", **kwargs):
-    """Responses API (hosted web_search) — real-OpenAI only. Uses the role's
-    first endpoint; on gateways this raises and the research agent skips."""
-    ep = providers.chain_for(role)[0]
-    spend()
-    t0 = time.perf_counter()
-    try:
-        resp = providers.client_for(ep).responses.create(model=ep.model, **kwargs)
-    except Exception as exc:
-        telemetry.record(label, ep.model, _ms(t0), kind="responses",
-                         status="error", error=str(exc), provider=ep.provider)
-        raise
-    usage = getattr(resp, "usage", None)
-    telemetry.record(
-        label, getattr(resp, "model", ep.model), _ms(t0),
-        getattr(usage, "input_tokens", None),
-        getattr(usage, "output_tokens", None),
-        getattr(usage, "total_tokens", None),
-        kind="responses", provider=ep.provider,
-        response=(getattr(resp, "output_text", "") or "")[:8000])
-    return resp
-
-
-# ---------------------------------------------------------------------------
-# Stage 0 — Employer research (web search, citations required)
-# ---------------------------------------------------------------------------
-RESEARCH_PROMPT = """You are an employer-research analyst helping a job applicant.
-Company: {company}
-Role (from the job description): {jd_excerpt}
-
-Research this company on the web and surface NON-OBVIOUS intel the applicant
-would not think to look up: culture signals and red flags, recent news, funding
-or layoffs, leadership changes, interview process reports, and strategic bets.
-
-Rules:
-- Every finding MUST be grounded in a source you actually found. Discard
-  anything you cannot cite.
-- Prefer the last 12 months.
-- Finish with 3-5 talking points the applicant can use in a cover letter or
-  interview.
-
-Return ONLY JSON in exactly this shape (no markdown fence):
-{{"findings": [{{"category": "...", "insight": "...", "sources": ["url"]}}],
-  "talking_points": ["..."]}}"""
-
-
-def run_research(company: str, jd_text: str) -> dict:
-    resp = _respond(
-        "research_web_search",
-        tools=[{"type": "web_search"}],
-        input=RESEARCH_PROMPT.format(company=company, jd_excerpt=jd_text[:1500]),
-    )
-    text = resp.output_text.strip()
-    # Tolerate a stray fence despite instructions.
-    if text.startswith("```"):
-        text = text.strip("`").removeprefix("json").strip()
-    data = json.loads(text)
-    # Enforce the citation rule server-side too.
-    data["findings"] = [f for f in data.get("findings", []) if f.get("sources")]
-    data.setdefault("talking_points", [])
-    return data
 
 
 # ---------------------------------------------------------------------------

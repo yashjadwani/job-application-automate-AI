@@ -407,34 +407,3 @@ def render_cv_docx(cv: dict, rewritten_bullets: dict[str, list[str]] | None = No
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
-
-
-# ---------------------------------------------------------------------------
-# Legacy: in-place edit of the original DOCX (Path A). Kept for reference/tests;
-# exports now use render_cv_docx instead.
-# ---------------------------------------------------------------------------
-def rewrite_docx(original: bytes, sections: list[dict],
-                 rewritten: dict[str, list[str]]) -> bytes:
-    doc = Document(io.BytesIO(original))
-    section_i = -1
-    bullet_i = 0
-    for para in _iter_paragraphs(doc):
-        if not para.text.strip():
-            continue
-        if _is_heading(para):
-            section_i += 1
-            bullet_i = 0
-        elif _is_bullet(para, doc) and section_i >= 0:
-            new_bullets = rewritten.get(f"sec_{section_i}")
-            if new_bullets and bullet_i < len(new_bullets):
-                runs = para.runs
-                if runs:
-                    runs[0].text = new_bullets[bullet_i]
-                    for r in runs[1:]:
-                        r.text = ""
-                else:
-                    para.add_run(new_bullets[bullet_i])
-            bullet_i += 1
-    buf = io.BytesIO()
-    doc.save(buf)
-    return buf.getvalue()

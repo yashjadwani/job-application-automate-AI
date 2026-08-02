@@ -402,9 +402,6 @@ def make_fake_llm():
                                           "matched_skills": ["Python"],
                                           "gaps": ["Kubernetes"],
                                           "summary": "decent fit"}))]))
-            if schema == "coverage":
-                return _fake_resp(FakeMsg(json.dumps(
-                    {"weak_categories": [], "sufficient": True})))
             if schema == "ats_keywords":
                 return _fake_resp(FakeMsg(json.dumps(
                     {"keywords": ["Python", "SQL", "Kubernetes"]})))
@@ -421,26 +418,15 @@ def make_fake_llm():
             # plain chat → cover letter draft / edit
             return _fake_resp(FakeMsg("Dear Hiring Manager,\n\nA fine letter."))
 
-    def fake_respond(label, **kwargs):
-        out = json.dumps({"findings": [
-            {"category": "recent news", "insight": "Raised Series B",
-             "sources": ["https://news.example.com/a"]}],
-            "talking_points": ["Mention the Series B"]})
-        usage = type("U", (), {"input_tokens": 200, "output_tokens": 80,
-                               "total_tokens": 280})()
-        return type("R", (), {"output_text": out, "usage": usage,
-                              "model": "fake"})()
-
-    return fake_chat, fake_respond, critic_calls
+    return fake_chat, critic_calls
 
 
 class TestPipelineDryRun:
     def test_hitl_run_pauses_then_resumes(self, monkeypatch):
         from app.pipeline import stages, worker
 
-        fake_chat, fake_respond, critic_calls = make_fake_llm()
+        fake_chat, critic_calls = make_fake_llm()
         monkeypatch.setattr(stages, "_chat", fake_chat)
-        monkeypatch.setattr(stages, "_respond", fake_respond)
 
         db = FakeDB()
         # Phase 1: must pause at awaiting_approval, with NO cover letter yet
@@ -483,9 +469,8 @@ class TestPipelineDryRun:
         from app.config import get_settings
         from app.pipeline import stages, worker
 
-        fake_chat, fake_respond, _ = make_fake_llm()
+        fake_chat, _ = make_fake_llm()
         monkeypatch.setattr(stages, "_chat", fake_chat)
-        monkeypatch.setattr(stages, "_respond", fake_respond)
         monkeypatch.setattr(get_settings(), "hitl_enabled", False)
 
         db = FakeDB()
@@ -550,7 +535,6 @@ class TestPipelineDryRun:
             raise RuntimeError("OpenAI unreachable")
 
         monkeypatch.setattr(stages, "_chat", explode)
-        monkeypatch.setattr(stages, "_respond", explode)
 
         db = FakeDB()
         worker.run_analysis(db, "user-1", "analysis-2", FAKE_PROFILE, FAKE_CV,
@@ -594,9 +578,8 @@ class TestPlanner:
         from app.pipeline import stages, worker
         monkeypatch.setattr(get_settings(), "planner_enabled", True)
 
-        fake_chat, fake_respond, _ = make_fake_llm()
+        fake_chat, _ = make_fake_llm()
         monkeypatch.setattr(stages, "_chat", fake_chat)
-        monkeypatch.setattr(stages, "_respond", fake_respond)
 
         db = FakeDB()
         worker.run_analysis(db, "u1", "a1", FAKE_PROFILE, FAKE_CV,
@@ -629,9 +612,8 @@ class TestPlanner:
         monkeypatch.setattr(get_settings(), "planner_enabled", True)
         monkeypatch.setattr(get_settings(), "hitl_enabled", False)
 
-        fake_chat, fake_respond, _ = make_fake_llm()
+        fake_chat, _ = make_fake_llm()
         monkeypatch.setattr(stages, "_chat", fake_chat)
-        monkeypatch.setattr(stages, "_respond", fake_respond)
 
         def boom(*a, **k):
             raise RuntimeError("search down")
